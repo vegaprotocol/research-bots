@@ -12,6 +12,7 @@ from typing import Optional
 from bots.api.helpers import by_key
 from bots.http.handler import Handler
 from bots.wallet.cli import VegaWalletCli
+from dataclasses import dataclass, asdict
 
 
 def is_trader(wallet_name: str) -> bool:
@@ -26,6 +27,41 @@ def get_config_attr_name(wallet_name: str) -> str:
             return trader_name
 
     raise RuntimeError(f"Attribute unknown for {wallet_name}")
+
+
+def _get_party_id_to_wanted_token_map(scenario_config: bots.config.types.ScenarioConfig, wallet_keys: dict[str, str]) -> dict[str, float]:
+    result = {}
+
+    for wallet_name in wallet_keys:
+        if not is_trader(wallet_name):
+            continue
+
+        trader_kind = get_config_attr_name(wallet_name)
+        trader_params = getattr(scenario_config, trader_kind)
+
+        result[wallet_keys[wallet_name]] = float(trader_params.initial_mint)
+
+    return result
+
+@dataclass
+class WantedToken:
+    party_id: str
+    symbol: str
+    vega_asset_id: str
+    asset_erc20_address: str
+    balance: float
+    wanted_tokens: float
+
+@dataclass
+class WalletWantedTokens:
+    entries: list[WantedToken]
+
+    def as_dict_for_party(self, party_id: str) -> dict:
+        result = []
+        for wanted_token_entry in [entry for entry in self.entries if entry.party_id == party_id]:
+            result = result + [asdict(wanted_token_entry)]
+
+        return result
 
 
 class Traders(Handler):
@@ -127,34 +163,24 @@ class Traders(Handler):
                 )
 
             scenario_market = self.markets[scenario_market_name]
-            vega_asset_id = self._vega_asset_id_for_market(scenario_market)
+            assets_ids = self._vega_asset_id_for_market(scenario_market)
             market_id = scenario_market["id"]
             market_tags = self._metadata_for_market(scenario_market)
 
             base = market_tags["ticker"] if "ticker" in market_tags else ""
             base = market_tags["base"] if "base" in market_tags else base
-            scenario_asset = self.assets[vega_asset_id]
-            # market is not for erc20 asset?
-            if not "erc20" in scenario_asset["details"]:
-                continue
 
             wallet_keys = self.wallet.list_keys(scenario)
-
-            # prepare balances
-            parties_ids = [wallet_keys[wallet_name] for wallet_name in wallet_keys]
-            parties_balances = {f"{party_id}": 0 for party_id in parties_ids}
-            accounts = bots.api.datanode.get_accounts(self.api_endpoints, vega_asset_id)
+            wanted_balances = _get_party_id_to_wanted_token_map(scenario_config, wallet_keys)
+            assets_ids = self._vega_asset_id_for_market(scenario_market)
+            balances = self._compute_wanted_tokens_for_wallet(
+                market_id,
+                assets_ids,
+                wallet_keys.values(),
+                wanted_balances,
+            )
 
             scenario_wallet_state = wallet_state.get(scenario, None)
-            for account in accounts:
-                if account.owner not in parties_balances:
-                    continue
-
-                if account.market_id not in ["", market_id]:
-                    continue
-
-                if account.type in ["ACCOUNT_TYPE_GENERAL", "ACCOUNT_TYPE_MARGIN"]:
-                    parties_balances[account.owner] += account.balance
 
             reported_wallets_count = {}
             for wallet_name in wallet_keys:
@@ -171,10 +197,6 @@ class Traders(Handler):
                 reported_wallets_for_trader_kind = reported_wallets_count.get(trader_kind, 0)
                 reported_wallets_count[trader_kind] = reported_wallets_for_trader_kind+1
 
-                trader_balance = 0
-                if trader_pub_key in parties_balances:
-                    trader_balance = parties_balances[trader_pub_key]
-
                 trader_key = f"{scenario}_{market_id}_{wallet_name}"
                 traders[trader_key] = {
                     "name": f"{market_id}_{wallet_name}",
@@ -182,13 +204,14 @@ class Traders(Handler):
                     "parameters": {
                         "marketBase": base,
                         "marketQuote": market_tags["quote"] if "quote" in market_tags else "",
-                        "marketSettlementEthereumContractAddress": scenario_asset["details"]["erc20"][
-                            "contractAddress"
-                        ],
-                        "marketSettlementVegaAssetID": vega_asset_id,
-                        "wantedTokens": trader_params.initial_mint,
-                        "balance": float(trader_balance)
-                        / (pow(10, int(self.assets[vega_asset_id]["details"]["decimals"]))),
+                        # "marketSettlementEthereumContractAddress": scenario_asset["details"]["erc20"][
+                        #     "contractAddress"
+                        # ],
+                        # "marketSettlementVegaAssetID": vega_asset_id,
+                        "wantedTokens": balances.as_dict_for_party(trader_pub_key),
+                        # "wantedTokens": trader_params.initial_mint,
+                        # "balance": float(trader_balance)
+                        # / (pow(10, int(self.assets[vega_asset_id]["details"]["decimals"]))),
                         "enableTopUp": scenario_config.enable_top_up,
                     },
                 }
@@ -211,7 +234,56 @@ class Traders(Handler):
 
         return traders
 
-    def _vega_asset_id_for_market(self, market: dict[str, any]) -> Optional[str]:
+    def _compute_wanted_tokens_for_wallet(self, market_id: str, assets_ids: list[str], wallet_keys: list[str], party_id_to_wanted_balance_map: dict[str, float]) -> WalletWantedTokens:
+        entries = []
+
+        for asset_id in assets_ids:
+            if not asset_id in self.assets:
+                Traders.logger.error(
+                    f"Missing asset {asset_id} on the network"
+                )
+
+                raise RuntimeError(f"Missing asset {asset_id} on the network")
+            asset = self.assets[asset_id]
+
+            if not "erc20" in asset["details"]:
+                Traders.logger.error(
+                    f"Market created for non ERC20 asset({asset_id}). NON ERC20 assets are not supported"
+                )
+                continue
+
+            accounts = bots.api.datanode.get_accounts(self.api_endpoints, asset_id)
+            # create mapping party_id => balance
+
+            party_to_balance_map = {}
+            for account in accounts:
+                if account.owner not in party_to_balance_map:
+                    party_to_balance_map[account.owner] = 0.0
+
+                if account.market_id not in ["", market_id]:
+                        continue
+
+                if not account.type in ["ACCOUNT_TYPE_GENERAL", "ACCOUNT_TYPE_MARGIN", "ACCOUNT_TYPE_BOND"]:
+                    continue
+
+                party_to_balance_map[account.owner] += float(account.balance) / (pow(10, int(asset["details"]["decimals"])))
+
+
+            for party_id in wallet_keys:
+                entries = entries + [
+                    WantedToken(
+                        party_id=party_id, 
+                        symbol=asset["details"]["symbol"], 
+                        vega_asset_id=asset["id"],
+                        asset_erc20_address=asset["details"]["erc20"]["contractAddress"],
+                        balance=(party_to_balance_map[party_id] if party_id in party_to_balance_map else 0.0),
+                        wanted_tokens=(party_id_to_wanted_balance_map[party_id] if party_id in party_id_to_wanted_balance_map else 0.0),
+                    )
+                ]
+
+        return WalletWantedTokens(entries)
+
+    def _vega_asset_id_for_market(self, market: dict[str, any]) -> list[str]:
         if not "tradableInstrument" in market:
             return None
 
@@ -219,10 +291,16 @@ class Traders(Handler):
             return None
 
         if "future" in market["tradableInstrument"]["instrument"]:
-            return market["tradableInstrument"]["instrument"]["future"]["settlementAsset"]
+            return [market["tradableInstrument"]["instrument"]["future"]["settlementAsset"]]
 
         if "perpetual" in market["tradableInstrument"]["instrument"]:
-            return market["tradableInstrument"]["instrument"]["perpetual"]["settlementAsset"]
+            return [market["tradableInstrument"]["instrument"]["perpetual"]["settlementAsset"]]
+
+        if "spot" in market["tradableInstrument"]["instrument"]:
+            return [
+                market["tradableInstrument"]["instrument"]["spot"]["quoteAsset"],
+                market["tradableInstrument"]["instrument"]["spot"]["baseAsset"],
+            ]
 
     def _metadata_for_market(self, market: dict[str, any]) -> dict[str, str]:
         if not "tradableInstrument" in market:

@@ -68,6 +68,7 @@ def get_accounts(
     asset_id: Optional[str] = None,
     parties: Optional[list[str]] = None,
     market_ids: Optional[list[str]] = None,
+    afterCursor: Optional[str] = None,
 ) -> list[bots.api.types.Account]:
     query = []
 
@@ -81,6 +82,9 @@ def get_accounts(
     if not market_ids is None:
         markets_list = ",".join(market_ids)
         query = query + [f"filter.marketIds={markets_list}"]
+
+    if not afterCursor is None:
+        query = query + [f"pagination.after={afterCursor}"]
 
     url = "api/v2/accounts"
 
@@ -110,6 +114,9 @@ def get_accounts(
                     type=edge["node"]["type"],
                 )
             )
+
+        if "pageInfo" in json_resp["accounts"] and "hasNextPage" in json_resp["accounts"]["pageInfo"] and json_resp["accounts"]["pageInfo"]["hasNextPage"]:
+            return response + get_accounts(endpoints, asset_id, parties, market_ids, json_resp["accounts"]["pageInfo"]["endCursor"])
 
         return response
 

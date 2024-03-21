@@ -23,6 +23,10 @@ from vega_sim.devops.classes import (
     SimulationArgs,
 )
 
+from vega_sim.api.market import MarketConfig
+# , SpotMarketConfig
+
+
 from vega_sim.scenario.common.utils.price_process import Granularity
 
 
@@ -127,12 +131,20 @@ def _scenarios_from_config(
                     binance_code=config[scenario_name].binance_code,
                     feed_price_multiplier=config[scenario_name].feed_price_multiplier,
                     market_manager_args=MarketManagerArgs(
-                        market_name=config[scenario_name].market_name,
-                        market_code=config[scenario_name].market_code,
-                        asset_name=config[scenario_name].market_manager.asset_name,
-                        adp=config[scenario_name].market_manager.adp,
-                        mdp=config[scenario_name].market_manager.mdp,
-                        pdp=config[scenario_name].market_manager.pdp,
+                        # market_name=config[scenario_name].market_name,
+                        # market_code=config[scenario_name].market_code,
+                        # asset_name=config[scenario_name].market_manager.asset_name,
+                        # adp=config[scenario_name].market_manager.adp,
+                        # mdp=config[scenario_name].market_manager.mdp,
+                        # pdp=config[scenario_name].market_manager.pdp,
+                        market_config=MarketConfig({
+                            "decimalPlaces": str(config[scenario_name].market_manager.mdp),
+                            "positionDecimalPlaces": str(config[scenario_name].market_manager.pdp),
+                            "instrument": {
+                                "code": config[scenario_name].market_code,
+                                "name": config[scenario_name].market_name,
+                            }
+                        })
                     ),
                     market_maker_args=MarketMakerArgs(
                         market_kappa=config[scenario_name].market_maker.market_kappa,

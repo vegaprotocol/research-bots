@@ -115,7 +115,7 @@ class VegaWalletCli:
 
         return wallet_name in wallets
 
-    def list_keys(self, wallet_name: str) -> str:
+    def list_keys(self, wallet_name: str) -> dict[str, str]:
         wallets = self.list_wallets()
 
         if not wallet_name in wallets:
